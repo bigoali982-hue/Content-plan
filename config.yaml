@@ -1,0 +1,50 @@
+posts_per_day: 3
+publish_status: future        # future (scheduled) or draft
+max_retries: 3
+
+models:
+  planner: google/gemini-2.5-flash-lite
+  vision_filter: google/gemini-2.5-flash-lite
+  writer: google/gemini-2.5-flash
+  fallback: openai/gpt-5-mini
+
+length:
+  min_items: 6
+  max_items: 20
+  min_words_per_section: 70
+  max_words_per_section: 180
+  overhead_words: 350          # intro + closing + FAQ
+  max_total_words: 3000
+
+research:
+  pages_to_fetch: 6
+
+images:
+  min_short_side: 600
+  min_short_side_instagram: 400
+  max_upscale: 1.0
+  min_aspect: 0.6
+  max_aspect: 2.5
+  max_rounds: 12
+  candidates_per_round: 40
+  instagram_posts_per_round: 10
+  max_vision_checks_per_keyword: 120
+  phash_distance: 8
+  max_total_uses: 2
+  cooldown_days: 30
+  max_images_per_domain: 3
+  enable_google_images: true
+  enable_research_pages: true
+  enable_instagram: true
+  enable_pexels: false
+
+costs:
+  max_cost_per_run_usd: 2.0
+  # Set these from your Bright Data plan. They are only used to estimate spend.
+  brightdata_serp_per_request: 0.0015
+  brightdata_unlocker_per_request: 0.0015
+  brightdata_dataset_per_record: 0.0015
+
+wordpress:
+  categories: ["Home Decor", "Pets"]
+  meta_description_key: ""     # e.g. _yoast_wpseo_metadesc (needs the key registered for REST)
