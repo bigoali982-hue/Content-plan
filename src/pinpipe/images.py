@@ -15,6 +15,7 @@ from PIL import Image, ImageOps
 from .config import env
 from .credits import Credit, site_name, strip_site_suffix
 from .openrouter import LLM, image_part
+from .recipe_facts import page_mentions, qualifier_of
 from .recipes import PET_RE, parse_recipes, pet_recipe_ok, recipe_matches_image
 from .state import ImageUsage
 from .utils import BudgetExceeded, Deadline, domain_of, log, normalize_url, slugify
@@ -462,7 +463,7 @@ def recipe_key(page_url: str, name: str) -> str:
 
 
 def find_recipe_images(keyword: str, plan: dict, research: dict, bd, llm: LLM, usage: ImageUsage, cfg: dict, exclude_urls: set[str] | None = None) -> tuple[list[Accepted], int]:
-    """Recipe posts: real recipe pages first. Optional top-up with photos for recipes developed by the writer."""
+    """Recipe posts: real recipe pages found by search first. Optional top-up with photos for recipes developed by the writer."""
     icfg = cfg["images"]
     target = plan["item_count"]
     queries = plan["search_queries"]
@@ -478,6 +479,9 @@ def find_recipe_images(keyword: str, plan: dict, research: dict, bd, llm: LLM, u
     llm_pages_left = int(icfg.get("llm_extraction_max_pages", 10)) if icfg.get("llm_extraction", True) else 0
     is_pet = bool(PET_RE.search(keyword))
     screen = bool(icfg.get("screen_real_recipes", False))
+    q_label, q_terms = qualifier_of(keyword)
+    q_mode = icfg.get("qualifier_mode", "prefer")  # prefer | require | off
+    use_q = bool(q_terms) and q_mode != "off"
     rejected_hashes: list = []
     vision_checks = fetches = rounds_used = 0
     stats = {"jsonld": 0, "markup": 0, "llm": 0, "none": 0}
@@ -514,11 +518,16 @@ def find_recipe_images(keyword: str, plan: dict, research: dict, bd, llm: LLM, u
         fetches += len(todo)
         log.info("Round %d (%r): %d pages to fetch, %d/%d accepted so far", rnd + 1, q, len(todo), len(accepted), target)
         pages = bd.fetch_html_many(todo, workers=workers)
-        for url in todo:
+        mentions = {u: page_mentions(pages.get(u) or "", q_terms) for u in todo} if use_q else {}
+        order = sorted(todo, key=lambda u: 0 if mentions.get(u, True) else 1) if use_q else todo  # pages that name the qualifier first
+        for url in order:
             if len(accepted) >= target or deadline.expired():
                 break
             page_html = pages.get(url)
             if not page_html:
+                continue
+            if use_q and q_mode == "require" and not mentions.get(url, False):
+                log.info("Skipped (page never mentions %s): %s", q_label, url[:100])
                 continue
             recipes, info = parse_recipes(page_html, url, llm if llm_pages_left > 0 else None, cfg, allow_llm=llm_pages_left > 0)
             if info["llm_called"]:
@@ -571,6 +580,7 @@ def find_recipe_images(keyword: str, plan: dict, research: dict, bd, llm: LLM, u
                     notes = dict(notes)
                     notes["recipe"] = recipe
                     notes["recipe_key"] = rkey
+                    notes["mentions_qualifier"] = bool(mentions.get(url, False)) if use_q else None
                     log.info("Accepted recipe %r (%s): %dx%d %s", recipe["name"], recipe.get("via"), img.width, img.height, img_url[:100])
                     domain_counts[host] = domain_counts.get(host, 0) + 1
                     accepted.append(Accepted(cand, process_image(img), thumb, ph, cand.credit(), notes))
