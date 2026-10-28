@@ -21,6 +21,10 @@
       "url": "https://tinyfarmtales.com/?p=36086"
     }
   },
-  "failed": {},
-  "retries": {}
+  "failed": {
+    "Homemade dog food recipes for large dogs": "HTTPSConnectionPool(host='tinyfarmtales.com', port=443): Max retries exceeded with url: /wp-json/wp/v2/media (Caused by NewConnectionError(\"HTTPSConnection(host='tinyfarmtales.com', port=443): Failed to establish a new connection: [Errno 101] Network is unreachable\"))"
+  },
+  "retries": {
+    "Homemade dog food recipes for large dogs": 1
+  }
 }
