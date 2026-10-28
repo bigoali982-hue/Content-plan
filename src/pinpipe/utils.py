@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 import unicodedata
 from urllib.parse import urlparse
@@ -18,16 +19,31 @@ class BudgetExceeded(Exception):
 
 
 class CostTracker:
+    """Thread-safe running cost. Raises BudgetExceeded once the cap is passed."""
+
     def __init__(self, cap: float) -> None:
         self.cap = cap
         self.total = 0.0
         self.parts: dict[str, float] = {}
+        self._lock = threading.Lock()
 
     def add(self, label: str, amount: float) -> None:
-        self.total += amount
-        self.parts[label] = self.parts.get(label, 0.0) + amount
-        if self.total > self.cap:
-            raise BudgetExceeded(f"Run cost ${self.total:.3f} exceeded cap ${self.cap:.2f}")
+        with self._lock:
+            self.total += amount
+            self.parts[label] = self.parts.get(label, 0.0) + amount
+            total = self.total
+        if total > self.cap:
+            raise BudgetExceeded(f"Run cost ${total:.3f} exceeded cap ${self.cap:.2f}")
+
+
+class Deadline:
+    """Wall-clock budget for one keyword. seconds <= 0 means no limit."""
+
+    def __init__(self, seconds: float) -> None:
+        self.end = time.monotonic() + seconds if seconds and seconds > 0 else None
+
+    def expired(self) -> bool:
+        return self.end is not None and time.monotonic() > self.end
 
 
 def retry(fn, attempts: int = 4, base: float = 2.0):
