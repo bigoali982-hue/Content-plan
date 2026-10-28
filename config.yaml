@@ -5,15 +5,17 @@ max_retries: 3
 models:
   planner: google/gemini-2.5-flash-lite
   vision_filter: google/gemini-2.5-flash-lite
+  extractor: google/gemini-2.5-flash-lite   # pulls recipes out of pages that have no recipe markup
   writer: google/gemini-2.5-flash
   fallback: openai/gpt-5-mini
 
 length:
   min_items: 6
+  min_items_recipe: 5           # recipe posts need fewer items when only real recipes are used
   max_items: 20
   min_words_per_section: 70
   max_words_per_section: 180
-  overhead_words: 350          # intro + closing + FAQ
+  overhead_words: 350           # intro + closing + FAQ
   max_total_words: 3000
 
 research:
@@ -32,11 +34,27 @@ images:
   phash_distance: 8
   max_total_uses: 2
   cooldown_days: 30
-  max_images_per_domain: 3
+  max_images_per_domain: 2
+  max_failures_per_domain: 3
   enable_google_images: true
   enable_research_pages: true
   enable_instagram: true
   enable_pexels: false
+
+  # --- recipe posts ---
+  allow_ai_recipes: false       # false = real recipes only. true = top up with recipes the AI invents (strict safety rules)
+  max_ai_recipes: 5
+  ai_recipe_max_rounds: 6
+  screen_real_recipes: false    # true = reject real recipes containing onion, garlic, raw meat, salt, etc.
+  max_recipes_per_domain: 2
+  max_recipes_per_page: 2
+  max_recipe_fetches_per_keyword: 40
+  image_search_recipe_pages: true  # also find recipe pages through Google Images (single-recipe pages rank better there)
+  fetch_workers: 6              # pages fetched in parallel
+  llm_extraction: true          # read recipes from pages without recipe markup
+  llm_extraction_max_pages: 10  # cost cap for that fallback, per keyword
+  skip_shop_blog_pages: true    # skip /blogs/ and ?srsltid= pages (shop blogs, almost never real recipes)
+  max_seconds_per_keyword: 1500 # stop searching after 25 minutes
 
 costs:
   max_cost_per_run_usd: 2.0
@@ -47,4 +65,5 @@ costs:
 
 wordpress:
   categories: ["Home Decor", "Pets"]
-  meta_description_key: ""     # e.g. _yoast_wpseo_metadesc (needs the key registered for REST)
+  meta_description_key: ""      # e.g. _yoast_wpseo_metadesc (needs the key registered for REST)
+  author_display_name: ""       # e.g. "Pet Home Studio"; empty keeps the account's name (may be an email)
