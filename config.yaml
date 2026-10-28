@@ -7,7 +7,12 @@ models:
   vision_filter: google/gemini-2.5-flash-lite
   extractor: google/gemini-2.5-flash-lite   # pulls recipes out of pages that have no recipe markup
   writer: google/gemini-2.5-flash
+  editor: google/gemini-2.5-flash           # second pass that line-edits every section (use a stronger model here for more polish)
   fallback: openai/gpt-5-mini
+
+writer:
+  polish: true                  # editor pass on every section
+  hook_min_score: 4             # the intro's first line is scored 1-5 and rewritten until it reaches this
 
 length:
   min_items: 6
@@ -41,11 +46,12 @@ images:
   enable_instagram: true
   enable_pexels: false
 
-  # --- recipe posts ---
+  # --- recipe posts: real recipes found by search come first ---
   allow_ai_recipes: false       # false = real recipes only. true = top up with recipes the AI invents (strict safety rules)
   max_ai_recipes: 5
   ai_recipe_max_rounds: 6
   screen_real_recipes: false    # true = reject real recipes containing onion, garlic, raw meat, salt, etc.
+  qualifier_mode: prefer        # keyword says "small dogs"/"senior cats"...: prefer = pages that mention it first, require = only those, off = ignore
   max_recipes_per_domain: 2
   max_recipes_per_page: 2
   max_recipe_fetches_per_keyword: 40
