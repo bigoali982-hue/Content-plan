@@ -12,11 +12,22 @@ from .config import load_config
 from .images import find_images
 from .openrouter import LLM
 from .planner import make_plan, order_items
+from .recipe_facts import glance_table_html, order_recipe_items, qualifier_of, recipe_facts, storage_notes_html
 from .research import run_research
 from .state import ImageUsage, State
 from .utils import BudgetExceeded, CostTracker, log, slugify
 from .wordpress import WordPress, WordPressUnavailable
 from .writer import SectionMemory, UnsafeRecipeError, assemble_post, section_html, write_final, write_section
+
+
+def order_accepted(kw: str, accepted: list, plan: dict, llm, cfg: dict, is_recipe: bool) -> list[int]:
+    """Recipes are grouped by main protein in code; everything else is ordered by the planner model."""
+    if is_recipe:
+        real = [i for i, a in enumerate(accepted) if a.notes.get("recipe")]
+        invented = [i for i, a in enumerate(accepted) if not a.notes.get("recipe")]
+        ranked = order_recipe_items([accepted[i].notes["recipe"] for i in real])
+        return [real[j] for j in ranked] + invented
+    return order_items(kw, [a.notes.get("description", "") for a in accepted], plan.get("order_by", ""), llm, cfg)
 
 
 def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
@@ -36,10 +47,9 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
         plan["item_count"] = len(accepted)
     total = len(accepted)
 
-    # Order images into a progression before writing, so sections follow it.
-    order = order_items(kw, [a.notes.get("description", "") for a in accepted], plan.get("order_by", ""), llm, cfg)
+    order = order_accepted(kw, accepted, plan, llm, cfg, is_recipe)
     accepted = [accepted[i] for i in order]
-    log.info("Item order: %s (%s)", order, plan.get("order_by", ""))
+    log.info("Item order: %s (%s)", order, "main protein" if is_recipe else plan.get("order_by", ""))
 
     sections, headings, kept = [], [], []
     mem = SectionMemory()
@@ -59,8 +69,14 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
     if total < min_items:
         raise RuntimeError(f"Only {total} sections passed safety checks (need {min_items})")
 
-    # The vet note and "recipes developed for this post" wording apply only to invented recipes in recipe posts.
+    # Facts for the intro, the at-a-glance table and the storage notes come from the real recipes only.
+    real_rows = [(a.notes["recipe"], s["anchor"], s["heading"]) for a, s in zip(accepted, sections) if a.notes.get("recipe")]
     plan["has_ai_recipes"] = is_recipe and any(not a.notes.get("recipe") for a in accepted)
+    plan["facts"] = recipe_facts([r for r, _a, _h in real_rows]) if is_recipe and real_rows else {}
+    q_label, _terms = qualifier_of(kw)
+    if is_recipe and q_label:
+        plan["qualifier"] = q_label
+        plan["qualifier_coverage"] = (sum(1 for a in accepted if a.notes.get("mentions_qualifier")), len(accepted))
     final = write_final(llm, cfg, kw, plan, headings, research["paa"])
     if is_recipe and plan["pet_health"] and plan["has_ai_recipes"]:
         final["pre_note"] = (
@@ -86,7 +102,7 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
         sections_html.append(section_html(sec, src, alt, acc.credit, acc.candidate.img_url))
 
     credits = [a.credit for a in accepted]
-    content = assemble_post(final, sections_html, credits)
+    content = assemble_post(final, sections_html, credits, glance_table_html(real_rows), storage_notes_html(real_rows))
     credit_log = {
         "keyword": kw,
         "title": final["seo_title"],
@@ -101,8 +117,7 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
         json.dump(credit_log, f, indent=2, ensure_ascii=False)
     content += f"\n<!-- image-credits: {json.dumps(credit_log['credits'])} -->"
 
-    real = sum(1 for a in accepted if a.notes.get("recipe"))
-    result = {"keyword": kw, "items": total, "rounds": rounds, "words": sum(s["words"] for s in sections), "real_recipes": real if is_recipe else None}
+    result = {"keyword": kw, "items": total, "rounds": rounds, "words": sum(s["words"] for s in sections), "real_recipes": len(real_rows) if is_recipe else None}
 
     if args.dry_run:
         os.makedirs(out_dir, exist_ok=True)
