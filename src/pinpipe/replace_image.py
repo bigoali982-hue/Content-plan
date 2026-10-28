@@ -8,17 +8,18 @@ from .brightdata import BrightData
 from .config import load_config
 from .images import find_images
 from .openrouter import LLM
+from .planner import is_pet_health
+from .research import run_research
 from .state import ImageUsage
 from .utils import CostTracker, count_words, log, slugify
-from .research import run_research
 from .wordpress import WordPress
-from .writer import section_html, write_section
+from .writer import SectionMemory, section_html, write_section
 
 SECTION_RE = re.compile(r'<section class="item">.*?</section>', re.S)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Replace one image (and rewrite its section) in a published post")
+    ap = argparse.ArgumentParser(description="Replace one image and rewrite its section in a published post (inspiration posts only)")
     ap.add_argument("--post-id", type=int, required=True)
     ap.add_argument("--image-url", required=True, help="Original or WordPress URL of the image to remove")
     ap.add_argument("--keyword", required=True, help="Original keyword of the post")
@@ -37,17 +38,25 @@ def main() -> None:
     if not target:
         raise SystemExit("No section contains that image URL")
     old = target.group(0)
+    if "<h3>Ingredients</h3>" in old or 'class="recipe-meta"' in old:
+        raise SystemExit("This is a recipe section: its text is tied to its photo, so edit or delete that item by hand in WordPress.")
     heading = re.search(r"<h2>(.*?)</h2>", old, re.S).group(1)
     words = max(count_words(re.sub(r"<[^>]+>", " ", old)), cfg["length"]["min_words_per_section"])
     existing = set(re.findall(r'data-source-img="([^"]+)"', content))
 
     research = run_research(args.keyword, bd, cfg)
-    plan = {"item_count": 1, "search_queries": [f"{args.keyword} {heading}", args.keyword], "keyword": args.keyword}
+    plan = {
+        "item_count": 1,
+        "search_queries": [f"{args.keyword} {heading}", args.keyword],
+        "keyword": args.keyword,
+        "intent": "inspiration",
+        "pet_health": is_pet_health(args.keyword),
+    }
     accepted, _ = find_images(args.keyword, plan, research, bd, llm, usage, cfg, exclude_urls=existing)
     if not accepted:
         raise SystemExit("No replacement image found")
     acc = accepted[0]
-    sec = write_section(llm, cfg, args.keyword, 1, 1, acc.vision_jpeg, words, [], [])
+    sec = write_section(llm, cfg, args.keyword, 1, 1, acc.vision_jpeg, words, [], SectionMemory(), acc.candidate.context(), plan=plan)
     alt = f"{sec['heading']} - {args.keyword}"
     media = wp.upload_media(acc.jpeg, f"{slugify(args.keyword)}-r{post['id']}.jpg", alt, acc.credit.caption_html())
     new = section_html(sec, media["url"], alt, acc.credit, acc.candidate.img_url)
