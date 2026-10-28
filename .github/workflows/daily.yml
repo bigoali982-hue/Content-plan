@@ -2,13 +2,17 @@ name: Daily content run
 
 on:
   schedule:
-    - cron: "0 5 * * *"      # 05:00 UTC every day (GitHub cron uses UTC)
+    - cron: "0 5 * * *"      # 05:00 UTC every day (GitHub cron uses UTC). Scheduled runs are REAL runs.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (no WordPress publishing)"
+        description: "Dry run (nothing is published, nothing is committed)"
         type: boolean
-        default: false
+        default: true
+      keyword:
+        description: "Optional: test ONE keyword only (leave empty to use keywords.txt)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -31,6 +35,8 @@ jobs:
       - name: Run pipeline
         env:
           PYTHONPATH: src
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          ONE_KEYWORD: ${{ github.event.inputs.keyword }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
           BRIGHTDATA_SERP_ZONE: ${{ secrets.BRIGHTDATA_SERP_ZONE }}
@@ -41,19 +47,18 @@ jobs:
           WP_USER: ${{ secrets.WP_USER }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            python -m pinpipe.main --dry-run
-          else
-            python -m pinpipe.main
-          fi
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ -n "$ONE_KEYWORD" ]; then args+=(--keyword "$ONE_KEYWORD"); fi
+          python -m pinpipe.main "${args[@]}"
       - name: Upload dry-run output
-        if: ${{ inputs.dry_run }}
+        if: ${{ always() && github.event.inputs.dry_run == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: dry-run-output
           path: output/
       - name: Commit state
-        if: always()
+        if: ${{ always() && github.event.inputs.dry_run != 'true' }}
         run: |
           git config user.name "content-bot"
           git config user.email "content-bot@users.noreply.github.com"
