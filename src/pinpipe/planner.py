@@ -3,11 +3,18 @@ from __future__ import annotations
 import json
 import re
 
+from .utils import BudgetExceeded
+
 RECIPE_RE = re.compile(r"\b(recipes?|how to make|homemade (?:dog|cat|pet) (?:food|treats?))\b", re.I)
 PET_RE = re.compile(r"\b(dogs?|cats?|pets?|puppy|puppies|kittens?)\b", re.I)
 HEALTH_RE = re.compile(
     r"\b(foods?|treats?|recipes?|diets?|feeding|feed|nutrition|supplements?|remed(?:y|ies)|"
     r"medic(?:ine|ation)s?|safe|toxic|poison(?:ous)?|health(?:y)?|vitamins?)\b",
+    re.I,
+)
+# Search variants like these pull in vet clinics, brand shops and diet debates instead of real recipes.
+BAD_PET_QUERY_RE = re.compile(
+    r"\b(vet[- ]approved|vet[- ]recommended|veterinarian|balanced|complete diet|nutritionally|healthy|vegan|vegetarian|plant[- ]based)\b",
     re.I,
 )
 
@@ -22,6 +29,25 @@ def is_pet_health(keyword: str) -> bool:
 
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def clean_queries(queries: list, keyword: str, pet_health: bool) -> list[str]:
+    """Dedupe, drop risky pet-food variants, and make sure the plain keyword is searched first."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in queries:
+        if not isinstance(q, str) or not q.strip():
+            continue
+        q = q.strip()
+        if pet_health and BAD_PET_QUERY_RE.search(q):
+            continue
+        if q.lower() in seen:
+            continue
+        seen.add(q.lower())
+        out.append(q)
+    if keyword and keyword.lower() not in seen:
+        out.insert(0, keyword)
+    return out or [keyword]
 
 
 def clamp_plan(plan: dict, stats: dict, cfg: dict) -> dict:
@@ -40,8 +66,6 @@ def clamp_plan(plan: dict, stats: dict, cfg: dict) -> dict:
     plan["item_count"] = items
     plan["words_per_section"] = wps
     plan["total_words"] = items * wps + L["overhead_words"]
-    queries = [q for q in plan.get("search_queries", []) if isinstance(q, str) and q.strip()]
-    plan["search_queries"] = queries or [plan.get("keyword", "")]
     plan["order_by"] = str(plan.get("order_by") or "").strip()
 
     kw = plan.get("keyword", "")
@@ -52,6 +76,7 @@ def clamp_plan(plan: dict, stats: dict, cfg: dict) -> dict:
         intent = "inspiration"
     plan["intent"] = intent
     plan["pet_health"] = is_pet_health(kw)
+    plan["search_queries"] = clean_queries(plan.get("search_queries", []), kw, plan["pet_health"])
     plan["image_hint"] = str(plan.get("image_hint") or "").strip()[:200]
     return plan
 
@@ -78,7 +103,7 @@ title (string, SEO headline with the number of items),
 item_count (int),
 words_per_section (int),
 angles_missed (list of 4-8 short strings: useful angles the competitors do NOT cover),
-search_queries (list of 10 image search queries. Each must target a DIFFERENT variant, style, ingredient or sub-topic of the keyword, not a synonym of another query, and should still contain the main keyword words),
+search_queries (list of 10 search queries. Each must target a DIFFERENT variant, style, ingredient or sub-topic of the keyword, not a synonym of another query, and should still contain the main keyword words. Never use health or diet-claim words such as "vet approved", "balanced", "healthy", "vegan"),
 intent ("inspiration" if readers want photos and ideas to browse, "recipe" if readers want to make something),
 image_hint (one short phrase describing the ideal photo for this keyword, e.g. "a finished, ready-to-serve dish, not raw ingredient layouts or prep stages" or "a styled room shown as a whole"),
 category (one of {json.dumps(cfg['wordpress']['categories'])}),
@@ -120,6 +145,8 @@ Return ONLY JSON: {{"order": [list of all {n} indices, each exactly once]}}"""
         order = [int(i) for i in res.get("order", [])]
         if sorted(order) == identity:
             return order
+    except BudgetExceeded:
+        raise
     except Exception:
         pass
     return identity
