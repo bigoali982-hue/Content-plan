@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
 import requests
 
 from .config import env
-from .utils import CostTracker, log, retry
+from .utils import BudgetExceeded, CostTracker, log, retry
 
 REQUEST_API = "https://api.brightdata.com/request"
 DATASET_SCRAPE = "https://api.brightdata.com/datasets/v3/scrape"
+LOCKOUT_WAIT = 16  # Bright Data: "try again ... after a minimum of 15 seconds"
+EMPTY_WAIT = 6
 
 
 class BrightData:
@@ -36,34 +39,66 @@ class BrightData:
         return retry(call)
 
     def serp(self, query: str, images: bool = False, page: int = 0) -> dict:
+        """Google results as JSON. Waits out Bright Data's 'recently failed' lockout instead of hammering it."""
         params = {"q": query, "hl": "en", "gl": "us", "brd_json": 1}
         if images:
             params.update({"tbm": "isch", "ijn": page})
         else:
             params.update({"start": page * 10, "num": 10})
         url = "https://www.google.com/search?" + urlencode(params)
-        for attempt in range(3):
+        attempts = 3
+        for attempt in range(attempts):
             r = self._request(self.serp_zone, url)
             self.cost.add("brightdata_serp", self.prices["brightdata_serp_per_request"])
+            text = (r.text or "").strip()
             try:
                 data = r.json()
                 if data:
                     return data
             except ValueError:
                 pass
+            locked = "recently failed" in text.lower()
+            wait = LOCKOUT_WAIT if (locked or not text) else EMPTY_WAIT
             log.warning(
-                "SERP empty or not JSON for %r (attempt %d/3); starts with: %s",
+                "SERP empty or not JSON for %r (attempt %d/%d)%s",
                 query,
                 attempt + 1,
-                r.text[:150].replace("\n", " "),
+                attempts,
+                " - Bright Data lockout" if locked else "",
             )
-            time.sleep(2 * (attempt + 1))
+            if attempt < attempts - 1:
+                time.sleep(wait)
         return {}
 
     def fetch_html(self, url: str) -> str:
         r = self._request(self.unlocker_zone, url)
         self.cost.add("brightdata_unlocker", self.prices["brightdata_unlocker_per_request"])
         return r.text
+
+    def fetch_html_many(self, urls: list[str], workers: int = 6) -> dict[str, str | None]:
+        """Fetch several pages in parallel. Failed pages map to None. A budget error is re-raised."""
+        if not urls:
+            return {}
+        out: dict[str, str | None] = {}
+        budget_error: BudgetExceeded | None = None
+
+        def one(u: str):
+            try:
+                return u, self.fetch_html(u), None
+            except BudgetExceeded as e:
+                return u, None, e
+            except Exception as e:
+                log.info("Page fetch failed for %s: %s", u[:110], e)
+                return u, None, None
+
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(urls)))) as pool:
+            for u, page, err in pool.map(one, urls):
+                out[u] = page
+                if err is not None:
+                    budget_error = err
+        if budget_error is not None:
+            raise budget_error
+        return out
 
     def fetch_bytes(self, url: str) -> bytes:
         r = self._request(self.unlocker_zone, url)
