@@ -19,6 +19,12 @@ def parse_page(html: str, url: str) -> dict:
     og = soup.find("meta", property="og:site_name")
     if og and og.get("content"):
         site = og["content"].strip()
+    title = ""
+    og_title = soup.find("meta", property="og:title")
+    if og_title and og_title.get("content"):
+        title = og_title["content"].strip()
+    elif soup.title and soup.title.string:
+        title = soup.title.string.strip()
     images = []
     og_img = soup.find("meta", property="og:image")
     if og_img and og_img.get("content"):
@@ -41,6 +47,7 @@ def parse_page(html: str, url: str) -> dict:
     per_item = max(words - 250, 0) / items if items else 0
     return {
         "url": url,
+        "title": title[:200],
         "site": site,
         "words": words,
         "items": items,
@@ -67,17 +74,27 @@ def summarize(pages: list[dict]) -> dict:
 def run_research(keyword: str, bd, cfg: dict) -> dict:
     data = bd.serp(keyword)
     organic = (data.get("organic") or [])[:10]
-    pages = []
+    wanted = int(cfg["research"]["pages_to_fetch"])
+    urls = []
     for item in organic:
-        if len(pages) >= cfg["research"]["pages_to_fetch"]:
-            break
         url = item.get("link") or item.get("url")
-        if not url or any(d in url for d in SKIP_DOMAINS):
+        if not url or any(d in url for d in SKIP_DOMAINS) or url in urls:
+            continue
+        urls.append(url)
+        if len(urls) >= wanted + 2:
+            break
+    fetched = bd.fetch_html_many(urls, workers=int(cfg.get("images", {}).get("fetch_workers", 6)))
+    pages = []
+    for url in urls:
+        html = fetched.get(url)
+        if not html:
             continue
         try:
-            pages.append(parse_page(bd.fetch_html(url), url))
+            pages.append(parse_page(html, url))
         except Exception as e:  # one broken page must not stop the run
-            log.warning("Could not fetch %s: %s", url, e)
+            log.warning("Could not parse %s: %s", url, e)
+        if len(pages) >= wanted:
+            break
     related = []
     for r in data.get("related") or []:
         related.append(r.get("text") if isinstance(r, dict) else str(r))
