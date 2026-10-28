@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import asdict, dataclass
 from datetime import date
 from urllib.parse import urlparse
@@ -19,6 +20,12 @@ KNOWN_SITES = {
     "countryliving.com": "Country Living",
     "southernliving.com": "Southern Living",
 }
+_MARKS = re.compile(r"[\u00ae\u2122\u00a9]")  # registered, trademark, copyright signs
+
+
+def clean_site(name: str) -> str:
+    """'Delicious Table (R)' -> 'Delicious Table'."""
+    return re.sub(r"\s+", " ", _MARKS.sub("", name or "")).strip()
 
 
 def _host(url: str) -> str:
@@ -32,7 +39,7 @@ def site_name(url: str, fallback: str = "") -> str:
         if host == dom or host.endswith("." + dom):
             return name
     if not host:
-        return fallback
+        return clean_site(fallback)
     parts = host.split(".")
     label = parts[-2] if len(parts) >= 2 else parts[0]
     return label.replace("-", " ").title()
@@ -57,7 +64,7 @@ def strip_site_suffix(text: str, site: str, page_url: str) -> str:
                 break
         if cut is None or cut == 0:
             break
-        text = text[:cut].rstrip(" |-–—:·,")
+        text = text[:cut].rstrip(" |-\u2013\u2014:\u00b7,")
     return text.strip()
 
 
@@ -69,9 +76,10 @@ class Credit:
     creator: str
     image_url: str
     found_on: str = ""
-    title: str = ""  # new; keep last so existing positional calls still work
+    title: str = ""  # keep last so existing positional calls still work
 
     def __post_init__(self) -> None:
+        self.site = clean_site(self.site)
         if not self.found_on:
             self.found_on = date.today().isoformat()
 
@@ -89,8 +97,8 @@ class Credit:
         site = html.escape(self.site)
         by = f" (photo by {html.escape(self.creator)})" if self.creator else ""
         if self.title:
-            return f'Source: {site} – "<a {attrs}>{html.escape(self.title)}</a>"{by}'
-        return f'Source: <a {attrs}>{site}</a>{by}'
+            return f'Source: {site} \u2013 \u201c<a {attrs}>{html.escape(self.title)}</a>\u201d{by}'
+        return f"Source: <a {attrs}>{site}</a>{by}"
 
     def plain(self) -> str:
         who = f"@{self.creator} on Instagram" if self.platform == "instagram" else self.site
