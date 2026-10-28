@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 from .brightdata import BrightData
@@ -14,6 +15,7 @@ from .planner import make_plan, order_items
 from .research import run_research
 from .state import ImageUsage, State
 from .utils import BudgetExceeded, CostTracker, log, slugify
+from .wordpress import WordPress, WordPressUnavailable
 from .writer import SectionMemory, UnsafeRecipeError, assemble_post, section_html, write_final, write_section
 
 
@@ -24,7 +26,9 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
     log.info("Intent: %s | pet_health=%s | order_by=%s | image_hint=%s", plan["intent"], plan["pet_health"], plan["order_by"], plan["image_hint"])
 
     accepted, rounds = find_images(kw, plan, research, bd, llm, usage, cfg)
-    min_items = cfg["length"]["min_items"]
+    L = cfg["length"]
+    is_recipe = plan["intent"] == "recipe"
+    min_items = int(L.get("min_items_recipe", L["min_items"])) if is_recipe else int(L["min_items"])
     if len(accepted) < min_items:
         raise RuntimeError(f"Only {len(accepted)} usable images after {rounds} rounds (need {min_items})")
     if len(accepted) < plan["item_count"]:
@@ -42,8 +46,8 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
     for i, acc in enumerate(accepted, 1):
         try:
             sec = write_section(
-                llm, cfg, kw, len(sections) + 1, total, acc.vision_jpeg, plan["words_per_section"],
-                plan.get("angles_missed", []), mem, acc.candidate.context(), plan=plan, recipe=acc.notes.get("recipe"),
+                llm, cfg, kw, len(sections) + 1, total, acc.vision_jpeg, plan["words_per_section"], plan.get("angles_missed", []), mem,
+                acc.candidate.context(), plan=plan, recipe=acc.notes.get("recipe"),
             )
         except UnsafeRecipeError as e:
             log.warning("Dropped item %d (%s): recipe failed safety checks: %s", i, acc.candidate.page_url[:80], e)
@@ -54,9 +58,11 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
     accepted, total = kept, len(kept)
     if total < min_items:
         raise RuntimeError(f"Only {total} sections passed safety checks (need {min_items})")
-    plan["has_ai_recipes"] = any(not a.notes.get("recipe") for a in accepted)
+
+    # The vet note and "recipes developed for this post" wording apply only to invented recipes in recipe posts.
+    plan["has_ai_recipes"] = is_recipe and any(not a.notes.get("recipe") for a in accepted)
     final = write_final(llm, cfg, kw, plan, headings, research["paa"])
-    if plan["intent"] == "recipe" and plan["pet_health"] and plan["has_ai_recipes"]:
+    if is_recipe and plan["pet_health"] and plan["has_ai_recipes"]:
         final["pre_note"] = (
             "Recipes marked as developed for this post are not guaranteed to be complete and balanced diets. "
             "Check with your veterinarian before changing your pet's diet."
@@ -64,8 +70,7 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
 
     slug = slugify(kw)
     out_dir = os.path.join("output", slug)
-    sections_html = []
-    uploaded = []
+    sections_html, uploaded = [], []
     for i, (acc, sec) in enumerate(zip(accepted, sections), 1):
         alt = f"{sec['heading']} - {kw}"
         if args.dry_run:
@@ -82,19 +87,29 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
 
     credits = [a.credit for a in accepted]
     content = assemble_post(final, sections_html, credits)
-    os.makedirs("logs/credits", exist_ok=True)
-    credit_log = {"keyword": kw, "title": final["seo_title"], "pin_title": final["pin_title"], "pin_description": final["pin_description"], "credits": [c.to_dict() for c in credits]}
-    with open(f"logs/credits/{slug}.json", "w", encoding="utf-8") as f:
+    credit_log = {
+        "keyword": kw,
+        "title": final["seo_title"],
+        "pin_title": final["pin_title"],
+        "pin_description": final["pin_description"],
+        "credits": [c.to_dict() for c in credits],
+    }
+    # Dry runs keep everything inside output/ so nothing gets committed to the repo.
+    credit_dir = out_dir if args.dry_run else os.path.join("logs", "credits")
+    os.makedirs(credit_dir, exist_ok=True)
+    with open(os.path.join(credit_dir, "credits.json" if args.dry_run else f"{slug}.json"), "w", encoding="utf-8") as f:
         json.dump(credit_log, f, indent=2, ensure_ascii=False)
     content += f"\n<!-- image-credits: {json.dumps(credit_log['credits'])} -->"
 
-    result = {"keyword": kw, "items": total, "rounds": rounds, "words": sum(s["words"] for s in sections)}
+    real = sum(1 for a in accepted if a.notes.get("recipe"))
+    result = {"keyword": kw, "items": total, "rounds": rounds, "words": sum(s["words"] for s in sections), "real_recipes": real if is_recipe else None}
+
     if args.dry_run:
         os.makedirs(out_dir, exist_ok=True)
         with open(os.path.join(out_dir, "post.html"), "w", encoding="utf-8") as f:
             f.write(f"<h1>{final['seo_title']}</h1>\n{content}")
         with open(os.path.join(out_dir, "plan.json"), "w", encoding="utf-8") as f:
-            json.dump({"plan": plan, "final": final, "order": order, "stats": research["stats"]}, f, indent=2, ensure_ascii=False)
+            json.dump({"plan": plan, "final": final, "order": order, "stats": research["stats"]}, f, indent=2, ensure_ascii=False, default=str)
         result["url"] = f"{out_dir}/post.html"
         return result
 
@@ -119,16 +134,24 @@ def process_keyword(kw: str, slot: int, args, cfg, bd, llm, usage, wp) -> dict:
     )
     for acc in accepted:
         usage.record(acc.candidate.img_url)
+        if acc.notes.get("recipe_key"):
+            usage.record(acc.notes["recipe_key"])
     usage.save()
     result["url"] = post["link"]
     return result
 
 
 def write_summary(done: list[dict], failed: list[tuple[str, str]], cost: CostTracker, dry: bool) -> None:
-    lines = [f"## Pinterest content run {'(dry run)' if dry else ''}", "", f"- Posts created: {len(done)}", f"- Failed keywords: {len(failed)}", f"- Total cost: ${cost.total:.3f}"]
+    lines = [
+        f"## Pinterest content run {'(DRY RUN - nothing published)' if dry else '(real run)'}",
+        "",
+        f"- Posts created: {len(done)}",
+        f"- Failed keywords: {len(failed)}",
+        f"- Total cost: ${cost.total:.3f}",
+    ]
     lines += [f"  - {k}: ${v:.3f}" for k, v in cost.parts.items()]
-    lines += ["", "| Keyword | Items | Rounds | Words | URL |", "|---|---|---|---|---|"]
-    lines += [f"| {d['keyword']} | {d['items']} | {d['rounds']} | {d['words']} | {d['url']} |" for d in done]
+    lines += ["", "| Keyword | Items | Real recipes | Rounds | Words | URL |", "|---|---|---|---|---|---|"]
+    lines += [f"| {d['keyword']} | {d['items']} | {d['real_recipes'] if d['real_recipes'] is not None else '-'} | {d['rounds']} | {d['words']} | {d['url']} |" for d in done]
     if failed:
         lines += ["", "### Failures"] + [f"- {k}: {e}" for k, e in failed]
     text = "\n".join(lines)
@@ -148,20 +171,29 @@ def main() -> None:
     ap.add_argument("--limit", type=int, help="Override posts per day")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log.info("MODE: %s", "DRY RUN - nothing will be published" if args.dry_run else "REAL RUN - posts will be created in WordPress")
 
     cfg = load_config(args.config)
     cost = CostTracker(cfg["costs"]["max_cost_per_run_usd"])
     state = State("state.json")
     usage = ImageUsage("image_usage.json", cfg["images"]["max_total_uses"], cfg["images"]["cooldown_days"])
     bd, llm = BrightData(cfg, cost), LLM(cfg, cost)
-    wp = None
-    if not args.dry_run:
-        from .wordpress import WordPress
 
+    # Check WordPress first, before any search or model money is spent.
+    wp = None
+    try:
         wp = WordPress()
+        wp.preflight()
         author_name = cfg["wordpress"].get("author_display_name")
-        if author_name:
+        if author_name and not args.dry_run:
             wp.set_author_name(author_name)
+    except Exception as e:
+        if not args.dry_run:
+            log.error("WordPress check failed, stopping before any money is spent: %s", e)
+            write_summary([], [("(WordPress check)", str(e))], cost, False)
+            sys.exit(1)
+        log.warning("WordPress check failed (a real run would stop here): %s", e)
+        wp = None
 
     n = args.limit or cfg["posts_per_day"]
     keywords = [args.keyword] if args.keyword else state.next_keywords(args.keywords, n, cfg["max_retries"])
@@ -174,6 +206,12 @@ def main() -> None:
                 state.mark_done(kw, done[-1]["url"])
         except BudgetExceeded as e:
             log.error("Stopping run: %s", e)
+            failed.append((kw, f"budget cap reached: {e}"))
+            break
+        except WordPressUnavailable as e:
+            # Not the keyword's fault: stop the run and keep the keyword's retries.
+            log.error("Stopping run, WordPress problem: %s", e)
+            failed.append((kw, f"WordPress problem: {e}"))
             break
         except Exception as e:
             log.exception("Keyword failed: %s", kw)
@@ -181,6 +219,8 @@ def main() -> None:
             if not args.dry_run:
                 state.mark_failed(kw, str(e))
     write_summary(done, failed, cost, args.dry_run)
+    if failed:
+        sys.exit(1)  # a failed run makes GitHub email you; progress is still committed by the workflow
 
 
 if __name__ == "__main__":
